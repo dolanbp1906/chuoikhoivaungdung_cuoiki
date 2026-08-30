@@ -30,3 +30,7 @@ Thumbs.db
 **/_check_env.js
 ~$*
 *.tmp
+
+# Local reports (not on GitHub)
+BAO_CAO.md
+
