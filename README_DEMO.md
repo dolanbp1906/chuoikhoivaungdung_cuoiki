@@ -3,13 +3,13 @@
 ## 1. Demo trên Hardhat Local
 
 ### Bước 1: Chạy blockchain local
-Trong thư mục `attendance-blockchain`:
+Trong thư mục gốc project:
 ```bash
 npx hardhat node --hostname 127.0.0.1 --port 8545
 ```
 
 ### Bước 2: Chạy frontend
-Mở terminal khác, trong thư mục `attendance-blockchain/frontend`:
+Mở terminal khác, trong thư mục `frontend`:
 ```bash
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
