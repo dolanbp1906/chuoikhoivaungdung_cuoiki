@@ -1,5 +1,11 @@
 # Báo cáo: Hệ thống điểm danh và ghi nhận hoạt động học tập (Blockchain)
 
+> Bản nộp Word/PowerPoint nằm ở thư mục gốc đề án:
+> - `BAO_CAO.docx`
+> - `BAO_CAO_SLIDES.pptx` (bản slide đẹp — dùng file này để thuyết trình)
+> - `BAO_CAO.pptx` (bản cũ, có thể bỏ)
+> - `NHAT_KY_SU_DUNG_AI.docx`
+
 ## 1. Mô tả bài toán
 Trong bối cảnh lớp học/khóa học yêu cầu minh chứng minh bạch về quá trình tham gia học tập, dữ liệu điểm danh và hoàn thành bài tập thường dễ bị thay đổi nếu lưu tập trung. Bài toán đặt ra là tạo cơ chế ghi nhận:
 - Không thể tùy ý sửa lịch sử điểm danh/hoàn thành.
@@ -99,7 +105,12 @@ Frontend nằm trong `attendance-blockchain/frontend`.
 5. **Chứng nhận có điều kiện**: `issueCertificate` yêu cầu có attendance và hoàn thành bài tập (nếu tồn tại) nhằm giảm cấp chứng nhận “bừa”.
 
 ## 9. Nhật ký sử dụng công cụ AI
-- [Điền theo nhóm]: Mô tả công cụ AI đã dùng để hỗ trợ tổng hợp bài toán, triển khai code, và soạn tài liệu.
+
+Nội dung nhật ký AI được nộp riêng trong file:
+
+**`NHAT_KY_SU_DUNG_AI.docx`** (thư mục gốc đề án)
+
+Tóm tắt: nhóm dùng **Cursor** hỗ trợ lập kế hoạch, smart contract, test, frontend, deploy Sepolia và soạn tài liệu; nhóm tự review, chạy thử và chịu trách nhiệm kết quả cuối cùng.
 
 ## 10. Hướng dẫn deploy testnet (Sepolia)
 1. Tạo file `.env` từ `.env.example`:
@@ -107,4 +118,14 @@ Frontend nằm trong `attendance-blockchain/frontend`.
    - `PRIVATE_KEY`
 2. Chạy:
    - `npx hardhat run scripts/deploy.js --network sepolia`
+
+### Địa chỉ đã deploy (Sepolia)
+| Contract | Address |
+|----------|---------|
+| RewardToken | `0x32c62BDFc15eF2d686f78b86491b284Ce91E2D67` |
+| CertificateNFT | `0xEcF323e23F345eEaFaFe565C56082e82E366B02F` |
+| AttendanceManager | `0x381bbF72B29bCf951d7e02d0cA43d5Db7922e2c8` |
+
+- Deployer: `0xe4388388774C1a06A3013831f2024Df4b75F13D1`
+- Repo: https://github.com/dolanbp1906/chuoikhoivaungdung_cuoiki
 
