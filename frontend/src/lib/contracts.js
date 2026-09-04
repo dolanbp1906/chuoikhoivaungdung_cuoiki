@@ -33,47 +33,60 @@ export function createContractInstances(providerOrSigner, addresses) {
   return { rewardToken, certificateNFT, attendanceManager };
 }
 
+/**
+ * Bọc signer bằng NonceManager để tránh "Nonce too low" khi gửi nhiều tx liên tiếp
+ * (đặc biệt với Wallet auto-sign trên Hardhat automine).
+ */
+export function withNonceManager(signer) {
+  if (signer instanceof ethers.NonceManager) return signer;
+  return new ethers.NonceManager(signer);
+}
+
 export async function deployAll(signer) {
-  const admin = await signer.getAddress();
+  const managed = withNonceManager(signer);
+  const admin = await managed.getAddress();
 
   const RewardTokenFactory = new ethers.ContractFactory(
     RewardTokenArtifact.abi,
     RewardTokenArtifact.bytecode,
-    signer
+    managed
   );
   const rewardToken = await RewardTokenFactory.deploy(admin);
   await rewardToken.waitForDeployment();
+  await rewardToken.deploymentTransaction()?.wait(1);
 
   const CertificateNFTFactory = new ethers.ContractFactory(
     CertificateNFTArtifact.abi,
     CertificateNFTArtifact.bytecode,
-    signer
+    managed
   );
   const certificateNFT = await CertificateNFTFactory.deploy(admin);
   await certificateNFT.waitForDeployment();
+  await certificateNFT.deploymentTransaction()?.wait(1);
+
+  const rewardTokenAddr = await rewardToken.getAddress();
+  const certificateNFTAddr = await certificateNFT.getAddress();
 
   const AttendanceManagerFactory = new ethers.ContractFactory(
     AttendanceManagerArtifact.abi,
     AttendanceManagerArtifact.bytecode,
-    signer
+    managed
   );
   const attendanceManager = await AttendanceManagerFactory.deploy(
-    await rewardToken.getAddress(),
-    await certificateNFT.getAddress()
+    rewardTokenAddr,
+    certificateNFTAddr
   );
   await attendanceManager.waitForDeployment();
+  await attendanceManager.deploymentTransaction()?.wait(1);
 
   const attendanceManagerAddr = await attendanceManager.getAddress();
 
-  // Connect Mint permissions
-  const rewardTokenAddr = await rewardToken.getAddress();
-  const certificateNFTAddr = await certificateNFT.getAddress();
-
-  await rewardToken.grantRole(MINTER_ROLE, attendanceManagerAddr);
-  await certificateNFT.grantRole(MINTER_ROLE, attendanceManagerAddr);
-
-  // Extra safety: make sure admin is teacher (constructor already does msg.sender)
-  await attendanceManager.grantRole(TEACHER_ROLE, admin);
+  let tx = await rewardToken.grantRole(MINTER_ROLE, attendanceManagerAddr);
+  await tx.wait(1);
+  tx = await certificateNFT.grantRole(MINTER_ROLE, attendanceManagerAddr);
+  await tx.wait(1);
+  tx = await attendanceManager.grantRole(TEACHER_ROLE, admin);
+  await tx.wait(1);
 
   return {
     rewardToken: rewardTokenAddr,
@@ -89,13 +102,11 @@ export function parseCertificateIssuedTokenId(attendanceManagerInterface, receip
     try {
       const parsed = attendanceManagerInterface.parseLog(log);
       if (parsed?.name === targetEventName) {
-        // event args: (classId, student, tokenId)
         return parsed.args.tokenId?.toString() ?? null;
       }
     } catch {
-      // ignore logs not matching
+      // ignore
     }
   }
   return null;
 }
-

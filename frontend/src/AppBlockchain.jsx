@@ -16,6 +16,24 @@ import {
   saveDeployment,
   saveStudentCertificateTokenId,
 } from "./lib/storage";
+import {
+  connectMetaMaskSepolia,
+  getConnectedMetaMask,
+  ensureSepolia,
+  SEPOLIA_CHAIN_ID,
+  SEPOLIA_CONTRACTS,
+  SEPOLIA_EXPLORER,
+  explorerAddressUrl,
+  explorerTxUrl,
+} from "./lib/wallet";
+
+const TEACHER_FLOWS = [
+  { id: "class", label: "Lớp học", short: "Lớp" },
+  { id: "enroll", label: "Học viên", short: "HV" },
+  { id: "attendance", label: "Điểm danh", short: "Điểm danh" },
+  { id: "assignment", label: "Bài tập", short: "Bài tập" },
+  { id: "certificate", label: "Chứng nhận", short: "CN" },
+];
 
 function toUnixSeconds(dateTimeLocal) {
   const ms = new Date(dateTimeLocal).getTime();
@@ -33,7 +51,6 @@ function formatBigInt(value) {
 
 function formatToken(value) {
   try {
-    // ERC-20 dùng 18 decimals: 1 token = 10^18 đơn vị nhỏ
     const formatted = ethers.formatEther(value);
     const n = Number(formatted);
     if (!Number.isFinite(n)) return formatted;
@@ -55,20 +72,28 @@ function classLabel(classes, classId) {
 }
 
 const REVERT_MESSAGES = [
-  ["Already enrolled", "Học viên này đã được đăng ký vào lớp rồi. Hãy điểm danh hoặc enroll địa chỉ khác."],
-  ["Student not enrolled", "Học viên chưa được đăng ký vào lớp. Hãy Enroll trước."],
+  ["Already enrolled", "Học viên này đã được đăng ký vào lớp rồi."],
+  ["Student not enrolled", "Học viên chưa được đăng ký vào lớp."],
   ["Class not active", "Lớp không còn hoạt động."],
-  ["Outside class period", "Ngoài thời gian học của lớp (startDate–endDate). Hãy kiểm tra ngày bắt đầu/kết thúc."],
+  ["Outside class period", "Ngoài thời gian học của lớp. Kiểm tra ngày bắt đầu/kết thúc."],
   ["Already completed", "Học viên đã hoàn thành bài tập này rồi."],
-  ["Certificate already issued", "Chứng nhận NFT đã được cấp cho học viên này trong lớp này."],
-  ["No attendance", "Chưa có điểm danh. Cần điểm danh ít nhất 1 buổi trước khi cấp chứng nhận."],
+  ["Certificate already issued", "Chứng nhận đã được cấp cho học viên này."],
+  ["No attendance", "Cần điểm danh ít nhất 1 buổi trước khi cấp chứng nhận."],
   ["Assignments not completed", "Học viên chưa hoàn thành hết bài tập của lớp."],
   ["Invalid dates", "Ngày kết thúc phải sau ngày bắt đầu."],
-  ["AccessControlUnauthorizedAccount", "Ví hiện tại không có quyền Teacher. Hãy dùng đúng ví đã deploy contract."],
+  ["AccessControlUnauthorizedAccount", "Ví không có quyền Teacher."],
   ["user rejected", "Bạn đã hủy giao dịch trên MetaMask."],
   ["ACTION_REJECTED", "Bạn đã hủy giao dịch trên MetaMask."],
   ["insufficient funds", "Ví không đủ ETH để trả phí gas."],
   ["network changed", "Mạng MetaMask đã đổi. Hãy Connect lại."],
+  ["ECONNREFUSED", "Không kết nối được máy chủ blockchain local. Hãy khởi động lại node rồi thử lại."],
+  ["failed to fetch", "Không kết nối được máy chủ blockchain local."],
+  ["could not decode", "Dữ liệu hợp đồng không còn hợp lệ. Hãy khởi tạo lại hệ thống."],
+  ["BAD_DATA", "Dữ liệu hợp đồng không còn hợp lệ. Hãy khởi tạo lại hệ thống."],
+  ["CALL_EXCEPTION", "Hợp đồng không phản hồi. Hãy khởi tạo lại hệ thống."],
+  ["nonce too low", "Giao dịch bị trùng. Đợi vài giây rồi thử lại."],
+  ["NONCE_EXPIRED", "Giao dịch hết hiệu lực. Hãy thử lại."],
+  ["replacement fee too low", "Giao dịch trùng. Đợi rồi thử lại."],
 ];
 
 function friendlyError(err) {
@@ -76,12 +101,15 @@ function friendlyError(err) {
     err?.shortMessage,
     err?.reason,
     err?.info?.error?.message,
+    err?.error?.message,
     err?.data?.message,
     err?.message,
     String(err ?? ""),
   ]
     .filter(Boolean)
     .join(" | ");
+
+  console.error("[tx error]", err);
 
   for (const [key, msg] of REVERT_MESSAGES) {
     if (raw.toLowerCase().includes(key.toLowerCase())) return msg;
@@ -95,10 +123,118 @@ function friendlyError(err) {
     return `Giao dịch bị từ chối: ${m[1]}`;
   }
 
-  if (raw.length > 160) {
-    return "Giao dịch thất bại. Kiểm tra lại dữ liệu nhập và quyền Teacher, rồi thử lại.";
-  }
+  // Lấy đoạn ngắn nhất có ý nghĩa thay vì nuốt hết lỗi
+  const short =
+    err?.shortMessage ||
+    err?.reason ||
+    err?.info?.error?.message ||
+    err?.error?.message ||
+    "";
+  if (short && short.length <= 220) return short;
+  if (raw.length > 220) return `${raw.slice(0, 200)}…`;
   return raw || "Đã xảy ra lỗi không xác định.";
+}
+
+/** datetime-local mặc định: giờ hiện tại → +30 ngày */
+function defaultClassRange() {
+  const start = new Date();
+  start.setMinutes(start.getMinutes() - start.getTimezoneOffset());
+  const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  end.setMinutes(end.getMinutes() - end.getTimezoneOffset());
+  return {
+    start: start.toISOString().slice(0, 16),
+    end: end.toISOString().slice(0, 16),
+  };
+}
+
+function CardTitle({ step, title }) {
+  return (
+    <div className="cardHead">
+      {step != null ? <span className="stepNum">{step}</span> : null}
+      <h2>{title}</h2>
+    </div>
+  );
+}
+
+function ClassSelect({ classes, value, onChange, disabled, emptyText }) {
+  return (
+    <select
+      className="select"
+      value={value}
+      disabled={disabled || !classes.length}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      {!classes.length ? (
+        <option value="">{emptyText || "Chưa có lớp"}</option>
+      ) : (
+        classes.map((c) => (
+          <option key={c.id} value={String(c.id)}>
+            #{c.id} — {c.name}
+          </option>
+        ))
+      )}
+    </select>
+  );
+}
+
+function StudentChecklist({ students, selected, onToggle, onSelectAll, onClear }) {
+  if (!students.length) {
+    return (
+      <div className="historyEmpty">
+        Lớp chưa có học viên. Vào mục <b>Học viên</b> để thêm trước.
+      </div>
+    );
+  }
+
+  return (
+    <div className="studentList">
+      <div className="studentListToolbar">
+        <span className="small">
+          Đã chọn <b>{selected.length}</b> / {students.length}
+        </span>
+        <div className="row" style={{ margin: 0, gap: 6 }}>
+          <button type="button" className="btn btnGhost btnSm" onClick={onSelectAll}>
+            Chọn tất cả
+          </button>
+          <button type="button" className="btn btnGhost btnSm" onClick={onClear}>
+            Bỏ chọn
+          </button>
+        </div>
+      </div>
+      {students.map((s) => {
+        const checked = selected.includes(s.addr);
+        return (
+          <label key={s.addr} className={`studentRow ${checked ? "studentRowOn" : ""}`}>
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => onToggle(s.addr)}
+            />
+            <span className="studentMeta">
+              <span className="listTitle">{s.name || "Chưa đặt tên"}</span>
+              <span className="mono small">{shortAddr(s.addr)}</span>
+            </span>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function StudentPicker({ students, value, onChange, emptyHint }) {
+  if (!students.length) {
+    return <div className="historyEmpty">{emptyHint || "Chưa có sinh viên trong lớp."}</div>;
+  }
+  return (
+    <select className="select" value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— Chọn sinh viên —</option>
+      {students.map((s) => (
+        <option key={s.addr} value={s.addr}>
+          {s.name || "Học viên"} · {shortAddr(s.addr)}
+        </option>
+      ))}
+    </select>
+  );
 }
 
 export default function AppBlockchain() {
@@ -107,16 +243,25 @@ export default function AppBlockchain() {
     []
   );
 
+  const [signerRef, setSignerRef] = useState(null);
   const [account, setAccount] = useState("");
   const [chainId, setChainId] = useState(null);
   const [deployment, setDeployment] = useState(() => loadDeployment());
   const [contracts, setContracts] = useState(null);
   const [isTeacher, setIsTeacher] = useState(false);
   const [status, setStatus] = useState({ type: "idle", message: "" });
-  const [tab, setTab] = useState("teacher"); // teacher | student
+  const [tab, setTab] = useState("teacher");
+  const [teacherFlow, setTeacherFlow] = useState("class");
+  const [busy, setBusy] = useState(false);
+  const [lastTxUrl, setLastTxUrl] = useState("");
 
   const [classes, setClasses] = useState([]);
+  const [studentClasses, setStudentClasses] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [roster, setRoster] = useState([]);
+  const [classSessions, setClassSessions] = useState([]);
+  const [selectedClassId, setSelectedClassId] = useState("");
+  const [attendanceSelected, setAttendanceSelected] = useState([]);
 
   const canUseContracts =
     Boolean(contracts?.attendanceManager) &&
@@ -124,11 +269,11 @@ export default function AppBlockchain() {
     Boolean(contracts?.certificateNFT);
 
   const chainHint = useMemo(() => {
-    if (chainId == null) return "";
-    if (chainId === 31337) return "Bạn đang ở Hardhat Local (31337).";
-    if (chainId === 11155111) return "Bạn đang ở Sepolia (11155111).";
-    if (chainId === 1) return "Đang ở Ethereum Mainnet (1) — hãy chuyển sang Sepolia.";
-    return `ChainId hiện tại: ${chainId}`;
+    if (chainId == null) return "Chưa kết nối ví";
+    if (chainId === SEPOLIA_CHAIN_ID) return "Sepolia testnet";
+    if (chainId === 31337) return "Hardhat local — hãy chuyển Sepolia";
+    if (chainId === 1) return "Ethereum Mainnet — hãy chuyển Sepolia";
+    return `Mạng ${chainId} — hãy chuyển Sepolia`;
   }, [chainId]);
 
   function setOk(message) {
@@ -141,24 +286,19 @@ export default function AppBlockchain() {
     setErr(friendlyError(err));
   }
 
-  // Teacher inputs
   const [className, setClassName] = useState("");
-  const [classStart, setClassStart] = useState("");
-  const [classEnd, setClassEnd] = useState("");
-  const [enrollClassId, setEnrollClassId] = useState("0");
+  const [classStart, setClassStart] = useState(() => defaultClassRange().start);
+  const [classEnd, setClassEnd] = useState(() => defaultClassRange().end);
   const [enrollStudentAddr, setEnrollStudentAddr] = useState("");
   const [enrollStudentName, setEnrollStudentName] = useState("");
-  const [attendanceClassId, setAttendanceClassId] = useState("0");
-  const [attendanceStudents, setAttendanceStudents] = useState("");
-  const [assignmentClassId, setAssignmentClassId] = useState("0");
+  const [enrollNameFromChain, setEnrollNameFromChain] = useState(false);
+  const [enrollAlreadyInClass, setEnrollAlreadyInClass] = useState(false);
   const [assignmentTitle, setAssignmentTitle] = useState("");
   const [assignmentDeadline, setAssignmentDeadline] = useState("");
-  const [completionAssignmentId, setCompletionAssignmentId] = useState("0");
+  const [completionAssignmentId, setCompletionAssignmentId] = useState("");
   const [completionStudentAddr, setCompletionStudentAddr] = useState("");
-  const [certificateClassId, setCertificateClassId] = useState("0");
   const [certificateStudentAddr, setCertificateStudentAddr] = useState("");
 
-  // Student inputs / outputs
   const [studentClassId, setStudentClassId] = useState("0");
   const [studentHistory, setStudentHistory] = useState([]);
   const [studentTokenBalance, setStudentTokenBalance] = useState("0");
@@ -166,6 +306,8 @@ export default function AppBlockchain() {
   const [studentCertificateBalance, setStudentCertificateBalance] = useState("0");
   const [cachedCertificateTokenId, setCachedCertificateTokenId] = useState(null);
   const [studentCompletedAssignmentIds, setStudentCompletedAssignmentIds] = useState([]);
+  const [studentAssignmentTotal, setStudentAssignmentTotal] = useState(0);
+  const [studentCertInfo, setStudentCertInfo] = useState(null);
 
   async function refreshClasses(attendanceManager) {
     const count = await attendanceManager.classCount();
@@ -185,11 +327,45 @@ export default function AppBlockchain() {
     }
 
     setClasses(list);
+    if (list.length && !list.some((c) => String(c.id) === String(selectedClassId))) {
+      setSelectedClassId(String(list[list.length - 1].id));
+    }
     return list;
   }
 
+  async function refreshStudentClasses(attendanceManager, studentAddr, allClasses) {
+    const source = allClasses || classes;
+    if (!attendanceManager || !ethers.isAddress(studentAddr) || !source.length) {
+      setStudentClasses([]);
+      setStudentClassId("");
+      return [];
+    }
+
+    const enrolledList = [];
+    for (const c of source) {
+      try {
+        const ok = await attendanceManager.enrolled(c.id, studentAddr);
+        if (ok) enrolledList.push(c);
+      } catch {
+        // bỏ qua lớp lỗi
+      }
+    }
+
+    setStudentClasses(enrolledList);
+    if (!enrolledList.length) {
+      setStudentClassId("");
+    } else if (!enrolledList.some((c) => String(c.id) === String(studentClassId))) {
+      setStudentClassId(String(enrolledList[0].id));
+    }
+    return enrolledList;
+  }
+
   async function refreshAssignments(attendanceManager, classId) {
-    const ids = await attendanceManager.getClassAssignments(classId);
+    if (classId === "" || classId == null || Number.isNaN(Number(classId))) {
+      setAssignments([]);
+      return [];
+    }
+    const ids = await attendanceManager.getClassAssignments(Number(classId));
     const list = [];
     for (const id of ids) {
       const a = await attendanceManager.assignments(id);
@@ -201,9 +377,63 @@ export default function AppBlockchain() {
       });
     }
     setAssignments(list);
+    if (list.length && !list.some((a) => a.id === completionAssignmentId)) {
+      setCompletionAssignmentId(list[0].id);
+    }
+    if (!list.length) setCompletionAssignmentId("");
     return list;
   }
 
+  async function refreshSessions(attendanceManager, classId) {
+    if (!attendanceManager || classId === "" || classId == null) {
+      setClassSessions([]);
+      return [];
+    }
+    try {
+      const list = await attendanceManager.getClassSessions(Number(classId));
+      const mapped = Array.from(list || []).map((s) => ({
+        sessionNumber: Number(s.sessionNumber),
+        timestamp: Number(s.timestamp),
+      }));
+      setClassSessions(mapped);
+      return mapped;
+    } catch {
+      setClassSessions([]);
+      return [];
+    }
+  }
+
+  async function refreshRoster(attendanceManager, classId) {
+    if (!attendanceManager || classId === "" || classId == null) {
+      setRoster([]);
+      setAttendanceSelected([]);
+      return [];
+    }
+    try {
+      const addrs = await attendanceManager.getClassStudents(Number(classId));
+      const list = [];
+      for (const addr of addrs) {
+        const info = await attendanceManager.students(addr);
+        list.push({
+          addr,
+          name: info.name || "",
+          registered: Boolean(info.registered),
+        });
+      }
+      setRoster(list);
+      setAttendanceSelected((prev) => prev.filter((a) => list.some((s) => s.addr === a)));
+      if (completionStudentAddr && !list.some((s) => s.addr === completionStudentAddr)) {
+        setCompletionStudentAddr("");
+      }
+      if (certificateStudentAddr && !list.some((s) => s.addr === certificateStudentAddr)) {
+        setCertificateStudentAddr("");
+      }
+      return list;
+    } catch (e) {
+      setRoster([]);
+      throw e;
+    }
+  }
 
   async function refreshTeacherRole(attendanceManager, addr) {
     if (!attendanceManager || !addr) {
@@ -220,94 +450,90 @@ export default function AppBlockchain() {
     }
   }
 
-  async function connectWallet() {
-    if (!window.ethereum) return setErr("Chưa thấy MetaMask (window.ethereum)");
+  async function tryLoadContracts(signer, addr, netChainId) {
+    let dep = loadDeployment();
+
+    if (
+      netChainId === SEPOLIA_CHAIN_ID &&
+      SEPOLIA_CONTRACTS &&
+      (!dep || dep.chainId !== SEPOLIA_CHAIN_ID)
+    ) {
+      dep = {
+        chainId: SEPOLIA_CHAIN_ID,
+        addresses: { ...SEPOLIA_CONTRACTS },
+        deployedAt: Date.now(),
+        source: "sepolia-preset",
+      };
+      saveDeployment(dep);
+    }
+
+    if (!dep || dep.chainId !== netChainId) {
+      setContracts(null);
+      setClasses([]);
+      setAssignments([]);
+      setRoster([]);
+      setClassSessions([]);
+      setIsTeacher(false);
+      setDeployment(null);
+      return false;
+    }
 
     try {
-      setStatus({ type: "idle", message: "Đang kết nối ví..." });
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      await provider.send("eth_requestAccounts", []);
-
-      const signer = await provider.getSigner();
-      const addr = await signer.getAddress();
-      const net = await provider.getNetwork();
-
-      setAccount(addr);
-      setChainId(Number(net.chainId));
-
-      const dep = loadDeployment();
-      if (dep && dep.chainId === Number(net.chainId)) {
-        const instances = createContractInstances(signer, dep.addresses);
-        setContracts(instances);
-        await refreshClasses(instances.attendanceManager);
-        const teacher = await refreshTeacherRole(instances.attendanceManager, addr);
-        setTab(teacher ? "teacher" : "student");
-      } else {
-        setContracts(null);
-        setClasses([]);
-        setAssignments([]);
-        setIsTeacher(false);
-      }
-
-      setOk(`Kết nối thành công: ${addr}`);
-    } catch (e) {
-      handleErr(e);
+      const instances = createContractInstances(signer, dep.addresses);
+      await instances.attendanceManager.classCount();
+      setContracts(instances);
+      setDeployment(dep);
+      await refreshClasses(instances.attendanceManager);
+      const teacher = await refreshTeacherRole(instances.attendanceManager, addr);
+      setTab(teacher ? "teacher" : "student");
+      return true;
+    } catch {
+      setContracts(null);
+      setClasses([]);
+      setAssignments([]);
+      setRoster([]);
+      setIsTeacher(false);
+      setErr("Không tải được hợp đồng. Kiểm tra mạng Sepolia và thử kết nối lại.");
+      return false;
     }
   }
 
-  async function switchToSepolia() {
-    if (!window.ethereum) return setErr("Chưa thấy MetaMask");
-    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7"; // 11155111
+  async function bindSigner(conn) {
+    setSignerRef(conn.signer);
+    setAccount(conn.address);
+    setChainId(conn.chainId);
+    await tryLoadContracts(conn.signer, conn.address, conn.chainId);
+  }
 
+  async function handleConnect() {
     try {
-      setStatus({ type: "idle", message: "Đang chuyển MetaMask sang Sepolia..." });
-      await window.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
-      });
-      await connectWallet();
-      setOk("Đã chuyển sang Sepolia (11155111).");
+      setBusy(true);
+      setStatus({ type: "idle", message: "Đang kết nối MetaMask (Sepolia)..." });
+      const conn = await connectMetaMaskSepolia();
+      await bindSigner(conn);
+      setOk(`Đã kết nối ${shortAddr(conn.address)} trên Sepolia`);
     } catch (e) {
-      // 4902 = chain chưa có trong MetaMask → thêm mạng
-      if (e?.code === 4902 || e?.error?.code === 4902) {
-        try {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: SEPOLIA_CHAIN_ID_HEX,
-                chainName: "Sepolia",
-                nativeCurrency: { name: "SepoliaETH", symbol: "ETH", decimals: 18 },
-                rpcUrls: ["https://rpc.sepolia.org"],
-                blockExplorerUrls: ["https://sepolia.etherscan.io"],
-              },
-            ],
-          });
-          await connectWallet();
-          setOk("Đã thêm và chuyển sang Sepolia (11155111).");
-        } catch (addErr) {
-          handleErr(addErr);
-        }
-      } else {
-        handleErr(e);
-      }
+      handleErr(e);
+    } finally {
+      setBusy(false);
     }
   }
 
   async function doDeploy() {
-    if (!window.ethereum) return setErr("Chưa có MetaMask");
+    if (!signerRef) return setErr("Vui lòng kết nối ví trước");
 
     try {
-      setStatus({ type: "idle", message: "Đang deploy hợp đồng..." });
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      await provider.send("eth_requestAccounts", []);
-      const signer = await provider.getSigner();
+      setBusy(true);
+      clearDeployment();
+      setContracts(null);
+      setStatus({
+        type: "idle",
+        message: "Đang triển khai hợp đồng — confirm từng giao dịch trên MetaMask...",
+      });
 
-      const depAddresses = await deployAll(signer);
-      const net = await provider.getNetwork();
-
+      const depAddresses = await deployAll(signerRef);
       const nextDeployment = {
-        chainId: Number(net.chainId),
+        chainId: Number(chainId),
         addresses: depAddresses,
         deployedAt: Date.now(),
       };
@@ -315,168 +541,185 @@ export default function AppBlockchain() {
       saveDeployment(nextDeployment);
       setDeployment(nextDeployment);
 
-      const instances = createContractInstances(signer, depAddresses);
+      const instances = createContractInstances(signerRef, depAddresses);
       setContracts(instances);
 
       await refreshClasses(instances.attendanceManager);
-      await refreshAssignments(instances.attendanceManager, Number(assignmentClassId));
-      await refreshTeacherRole(instances.attendanceManager, await signer.getAddress());
+      await refreshTeacherRole(instances.attendanceManager, account);
       setTab("teacher");
-      setOk("Deploy xong.");
+      setTeacherFlow("class");
+      setIsTeacher(true);
+      setOk("Đã triển khai hợp đồng trên Sepolia.");
+      setLastTxUrl(explorerAddressUrl(depAddresses.attendanceManager));
     } catch (e) {
       handleErr(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function withTx(message, fn) {
+    if (!canUseContracts) return;
+    try {
+      setBusy(true);
+      setLastTxUrl("");
+      setStatus({ type: "idle", message: `${message} — confirm trên MetaMask...` });
+      const maybeHash = await fn();
+      if (maybeHash && typeof maybeHash === "string" && maybeHash.startsWith("0x")) {
+        setLastTxUrl(explorerTxUrl(maybeHash));
+      }
+    } catch (e) {
+      handleErr(e);
+    } finally {
+      setBusy(false);
     }
   }
 
   async function handleCreateClass() {
-    if (!canUseContracts) return;
     const startTs = toUnixSeconds(classStart);
     const endTs = toUnixSeconds(classEnd);
+    if (!className.trim()) return setErr("Vui lòng nhập tên lớp");
+    if (!startTs || !endTs) return setErr("Vui lòng chọn thời gian bắt đầu và kết thúc");
 
-    if (!className.trim()) return setErr("Nhập tên lớp");
-    if (!startTs || !endTs) return setErr("Chọn thời gian bắt đầu/kết thúc");
-
-    try {
-      setStatus({ type: "idle", message: "Tạo lớp..." });
+    await withTx("Đang tạo lớp", async () => {
       const tx = await contracts.attendanceManager.createClass(className, startTs, endTs);
       await tx.wait();
-
       const list = await refreshClasses(contracts.attendanceManager);
       if (list.length) {
-        const last = list[list.length - 1];
-        setEnrollClassId(String(last.id));
-        setAttendanceClassId(String(last.id));
-        setAssignmentClassId(String(last.id));
-        setCertificateClassId(String(last.id));
-        setStudentClassId(String(last.id));
+        const id = String(list[list.length - 1].id);
+        setSelectedClassId(id);
+        setStudentClassId(id);
       }
-      setOk("Tạo lớp thành công");
-    } catch (e) {
-      handleErr(e);
-    }
+      setClassName("");
+      setOk("Đã tạo lớp học.");
+      setTeacherFlow("enroll");
+      return tx.hash;
+    });
   }
 
   async function handleEnroll() {
-    if (!canUseContracts) return;
-    if (!ethers.isAddress(enrollStudentAddr)) return setErr("Địa chỉ học viên không hợp lệ");
+    if (!selectedClassId) return setErr("Vui lòng chọn lớp");
+    if (!ethers.isAddress(enrollStudentAddr)) return setErr("Địa chỉ ví học viên không hợp lệ");
 
-    try {
-      setStatus({ type: "idle", message: "Enroll học viên..." });
+    await withTx("Đang thêm học viên", async () => {
       const tx = await contracts.attendanceManager.enrollStudent(
-        Number(enrollClassId),
+        Number(selectedClassId),
         enrollStudentAddr,
         enrollStudentName || "Student"
       );
       await tx.wait();
-      await refreshClasses(contracts.attendanceManager);
-      setOk("Enroll xong");
-    } catch (e) {
-      handleErr(e);
-    }
+      await refreshRoster(contracts.attendanceManager, selectedClassId);
+      setEnrollStudentAddr("");
+      setEnrollStudentName("");
+      setEnrollNameFromChain(false);
+      setEnrollAlreadyInClass(false);
+      setOk("Đã thêm học viên vào lớp.");
+      return tx.hash;
+    });
   }
 
   async function handleMarkAttendance() {
-    if (!canUseContracts) return;
-    const raw = attendanceStudents.split(/[\\n,]/g).map((s) => s.trim()).filter(Boolean);
-    const cleaned = raw.filter((a) => ethers.isAddress(a));
-    if (cleaned.length === 0) return setErr("Chưa có địa chỉ hợp lệ để điểm danh");
+    if (!selectedClassId) return setErr("Vui lòng chọn lớp");
+    if (!attendanceSelected.length) return setErr("Chọn ít nhất một học viên");
 
-    try {
-      setStatus({ type: "idle", message: "Đang điểm danh..." });
-      const tx = await contracts.attendanceManager.markAttendance(Number(attendanceClassId), cleaned);
+    await withTx("Đang điểm danh", async () => {
+      const count = attendanceSelected.length;
+      const tx = await contracts.attendanceManager.markAttendance(
+        Number(selectedClassId),
+        attendanceSelected
+      );
       await tx.wait();
-      setOk("Điểm danh xong");
-    } catch (e) {
-      handleErr(e);
-    }
+      const sessions = await refreshSessions(contracts.attendanceManager, selectedClassId);
+      const last = sessions[sessions.length - 1];
+      setAttendanceSelected([]);
+      setOk(
+        last
+          ? `Đã điểm danh Buổi ${last.sessionNumber} · ${count} học viên.`
+          : `Đã điểm danh ${count} học viên.`
+      );
+      return tx.hash;
+    });
   }
 
   async function handleCreateAssignment() {
-    if (!canUseContracts) return;
+    if (!selectedClassId) return setErr("Vui lòng chọn lớp");
     const deadlineTs = toUnixSeconds(assignmentDeadline);
-    if (!assignmentTitle.trim()) return setErr("Nhập tiêu đề bài tập");
-    if (!deadlineTs) return setErr("Chọn deadline");
+    if (!assignmentTitle.trim()) return setErr("Vui lòng nhập tiêu đề bài tập");
+    if (!deadlineTs) return setErr("Vui lòng chọn hạn nộp");
 
-    try {
-      setStatus({ type: "idle", message: "Tạo bài tập..." });
+    await withTx("Đang tạo bài tập", async () => {
       const tx = await contracts.attendanceManager.createAssignment(
-        Number(assignmentClassId),
+        Number(selectedClassId),
         assignmentTitle,
         deadlineTs
       );
       await tx.wait();
-      await refreshAssignments(contracts.attendanceManager, Number(assignmentClassId));
-      setOk("Tạo bài tập thành công");
-    } catch (e) {
-      handleErr(e);
-    }
+      await refreshAssignments(contracts.attendanceManager, selectedClassId);
+      setAssignmentTitle("");
+      setOk("Đã tạo bài tập.");
+      return tx.hash;
+    });
   }
 
   async function handleRecordCompletion() {
-    if (!canUseContracts) return;
-    if (!ethers.isAddress(completionStudentAddr)) return setErr("Địa chỉ học viên không hợp lệ");
+    if (!completionAssignmentId) return setErr("Vui lòng chọn bài tập");
+    if (!ethers.isAddress(completionStudentAddr)) return setErr("Vui lòng chọn học viên");
 
-    try {
-      setStatus({ type: "idle", message: "Ghi nhận hoàn thành..." });
+    await withTx("Đang ghi nhận hoàn thành", async () => {
       const tx = await contracts.attendanceManager.recordAssignmentCompletion(
         Number(completionAssignmentId),
         completionStudentAddr
       );
       await tx.wait();
-      setOk("Hoàn thành xong");
-    } catch (e) {
-      handleErr(e);
-    }
+      setOk("Đã ghi nhận hoàn thành bài tập.");
+      return tx.hash;
+    });
   }
 
   async function handleIssueCertificate() {
-    if (!canUseContracts) return;
-    if (!ethers.isAddress(certificateStudentAddr)) return setErr("Địa chỉ học viên không hợp lệ");
+    if (!selectedClassId) return setErr("Vui lòng chọn lớp");
+    if (!ethers.isAddress(certificateStudentAddr)) return setErr("Vui lòng chọn học viên");
 
-    try {
-      setStatus({ type: "idle", message: "Đang phát hành chứng nhận..." });
+    await withTx("Đang cấp chứng nhận", async () => {
       const tx = await contracts.attendanceManager.issueCertificate(
-        Number(certificateClassId),
+        Number(selectedClassId),
         certificateStudentAddr
       );
       const receipt = await tx.wait();
-
       const tokenId = parseCertificateIssuedTokenId(attendanceInterface, receipt);
       if (tokenId != null) {
         saveStudentCertificateTokenId(
           Number(chainId ?? 0),
-          Number(certificateClassId),
+          Number(selectedClassId),
           certificateStudentAddr,
           tokenId
         );
       }
-
-      setOk(
-        tokenId != null
-          ? `Cấp chứng nhận xong (tokenId=${tokenId})`
-          : "Cấp chứng nhận xong"
-      );
-    } catch (e) {
-      handleErr(e);
-    }
+      setOk(tokenId != null ? `Đã cấp chứng nhận (#${tokenId}).` : "Đã cấp chứng nhận.");
+      return tx.hash;
+    });
   }
 
   async function refreshStudentViews() {
     if (!canUseContracts) return;
     if (!ethers.isAddress(account)) return;
+    if (studentClassId === "" || studentClassId == null) {
+      setOk("Bạn chưa được thêm vào lớp nào.");
+      return;
+    }
 
     const cid = Number(studentClassId);
     try {
-      setStatus({ type: "idle", message: "Đang load dữ liệu học tập..." });
-
-      // Reset theo lớp trước khi load — tránh giữ số liệu lớp cũ
+      setStatus({ type: "idle", message: "Đang tải dữ liệu học tập..." });
       setStudentAttendanceCount("0");
       setStudentHistory([]);
       setStudentCompletedAssignmentIds([]);
+      setStudentAssignmentTotal(0);
       setCachedCertificateTokenId(null);
       setStudentCertificateBalance("0");
+      setStudentCertInfo(null);
 
-      const [bal, attendCount, certForClass, enrolledHere, history, completedAssignmentIds] =
+      const [bal, attendCount, certForClass, enrolledHere, history, completedAssignmentIds, classAssignmentIds] =
         await Promise.all([
           contracts.rewardToken.balanceOf(account),
           contracts.attendanceManager.getStudentAttendanceCount(cid, account),
@@ -484,51 +727,139 @@ export default function AppBlockchain() {
           contracts.attendanceManager.enrolled(cid, account),
           contracts.attendanceManager.getAttendanceHistory(cid, account),
           contracts.attendanceManager.getCompletedAssignments(cid, account),
+          contracts.attendanceManager.getClassAssignments(cid),
         ]);
+
+      const completed = Array.from(completedAssignmentIds || [], (id) => id.toString());
+      const total = Array.from(classAssignmentIds || []).length;
 
       setStudentTokenBalance(formatToken(bal));
       setStudentAttendanceCount(formatBigInt(attendCount));
-      // NFT theo lớp (không dùng balanceOf cả ví)
       setStudentCertificateBalance(certForClass ? "1" : "0");
-
-      const last = history.slice(-10).map((r) => ({
-        timestamp: Number(r.timestamp),
-        present: Boolean(r.present),
-      }));
-      setStudentHistory(last);
-
-      setStudentCompletedAssignmentIds(
-        completedAssignmentIds.map((id) => id.toString())
+      setStudentHistory(
+        history.slice(-20).map((r) => ({
+          timestamp: Number(r.timestamp),
+          present: Boolean(r.present),
+          sessionNumber: Number(r.sessionNumber ?? 0),
+        }))
       );
+      setStudentCompletedAssignmentIds(completed);
+      setStudentAssignmentTotal(total);
 
       const cachedId = loadStudentCertificateTokenId(Number(chainId ?? 0), cid, account);
       setCachedCertificateTokenId(cachedId);
 
-      if (!enrolledHere) {
-        setOk(`Load xong — ví chưa enroll lớp #${cid}`);
-      } else {
-        setOk(`Load xong — lớp #${cid}`);
+      if (certForClass && cachedId != null) {
+        try {
+          const cert = await contracts.certificateNFT.getCertificate(cachedId);
+          const rate = Number(await contracts.certificateNFT.attendanceRate(cachedId));
+          setStudentCertInfo({
+            tokenId: cachedId,
+            className: cert.className,
+            studentName: cert.studentName,
+            attendanceCount: Number(cert.attendanceCount),
+            totalSessions: Number(cert.totalSessions),
+            rate,
+            completionDate: Number(cert.completionDate),
+          });
+        } catch {
+          setStudentCertInfo(null);
+        }
       }
+
+      setOk(
+        enrolledHere
+          ? "Đã cập nhật thông tin học tập."
+          : "Bạn chưa được đăng ký vào lớp này."
+      );
     } catch (e) {
       handleErr(e);
     }
   }
 
-  useEffect(() => {
-    if (!canUseContracts) return;
-    refreshClasses(contracts.attendanceManager).catch(() => {});
-  }, [canUseContracts]);
+  function toggleAttendance(addr) {
+    setAttendanceSelected((prev) =>
+      prev.includes(addr) ? prev.filter((a) => a !== addr) : [...prev, addr]
+    );
+  }
 
   useEffect(() => {
     if (!canUseContracts) return;
-    refreshAssignments(contracts.attendanceManager, Number(assignmentClassId)).catch(() => {});
-  }, [canUseContracts, assignmentClassId]);
+    refreshClasses(contracts.attendanceManager).catch(handleErr);
+  }, [canUseContracts]);
+
+  useEffect(() => {
+    if (!canUseContracts || isTeacher || !ethers.isAddress(account)) {
+      if (isTeacher) setStudentClasses([]);
+      return;
+    }
+    refreshStudentClasses(contracts.attendanceManager, account, classes).catch(handleErr);
+  }, [canUseContracts, isTeacher, account, classes]);
+
+  useEffect(() => {
+    if (!canUseContracts || !selectedClassId) return;
+    refreshAssignments(contracts.attendanceManager, selectedClassId).catch(handleErr);
+    refreshRoster(contracts.attendanceManager, selectedClassId).catch(handleErr);
+    refreshSessions(contracts.attendanceManager, selectedClassId).catch(handleErr);
+  }, [canUseContracts, selectedClassId]);
 
   useEffect(() => {
     if (!canUseContracts) return;
     if (isTeacher && tab !== "teacher") setTab("teacher");
     if (!isTeacher && tab !== "student") setTab("student");
   }, [canUseContracts, isTeacher]);
+
+  async function lookupEnrollStudent(addr) {
+    if (!canUseContracts || !ethers.isAddress(addr)) {
+      setEnrollNameFromChain(false);
+      setEnrollAlreadyInClass(false);
+      return;
+    }
+
+    // Nhanh: đã có trong roster lớp hiện tại
+    const inRoster = roster.some((s) => s.addr.toLowerCase() === addr.toLowerCase());
+    if (inRoster) setEnrollAlreadyInClass(true);
+
+    try {
+      const tasks = [contracts.attendanceManager.students(addr)];
+      if (selectedClassId !== "" && selectedClassId != null) {
+        tasks.push(contracts.attendanceManager.enrolled(Number(selectedClassId), addr));
+      }
+      const [info, already] = await Promise.all(tasks);
+      if (info.registered && info.name) {
+        setEnrollStudentName(info.name);
+        setEnrollNameFromChain(true);
+      } else {
+        setEnrollNameFromChain(false);
+      }
+      if (already !== undefined) {
+        setEnrollAlreadyInClass(Boolean(already) || inRoster);
+      }
+    } catch {
+      setEnrollNameFromChain(false);
+      if (!inRoster) setEnrollAlreadyInClass(false);
+    }
+  }
+
+  function onEnrollAddrChange(value) {
+    setEnrollStudentAddr(value);
+    setEnrollNameFromChain(false);
+    const trimmed = value.trim();
+    if (ethers.isAddress(trimmed)) {
+      lookupEnrollStudent(trimmed);
+    } else {
+      setEnrollAlreadyInClass(false);
+    }
+  }
+
+  useEffect(() => {
+    const trimmed = enrollStudentAddr.trim();
+    if (ethers.isAddress(trimmed)) {
+      lookupEnrollStudent(trimmed);
+    } else {
+      setEnrollAlreadyInClass(false);
+    }
+  }, [selectedClassId, roster, canUseContracts]);
 
   useEffect(() => {
     if (!canUseContracts || tab !== "student") return;
@@ -539,363 +870,641 @@ export default function AppBlockchain() {
   useEffect(() => {
     if (!window.ethereum?.on) return undefined;
 
-    const onChainChanged = () => {
-      // MetaMask khuyến nghị reload khi đổi chain
-      window.location.reload();
-    };
-    const onAccountsChanged = () => {
-      window.location.reload();
+    const onAccountsChanged = async (accounts) => {
+      if (!accounts?.length) {
+        setAccount("");
+        setSignerRef(null);
+        setContracts(null);
+        setIsTeacher(false);
+        setOk("Đã ngắt kết nối ví.");
+        return;
+      }
+      try {
+        const conn = await getConnectedMetaMask();
+        if (!conn) return;
+        if (conn.chainId !== SEPOLIA_CHAIN_ID) {
+          await ensureSepolia();
+          await handleConnect();
+          return;
+        }
+        await bindSigner(conn);
+        setOk(`Đã đổi ví: ${shortAddr(conn.address)}`);
+      } catch (e) {
+        handleErr(e);
+      }
     };
 
-    window.ethereum.on("chainChanged", onChainChanged);
+    const onChainChanged = () => window.location.reload();
+
     window.ethereum.on("accountsChanged", onAccountsChanged);
+    window.ethereum.on("chainChanged", onChainChanged);
     return () => {
-      window.ethereum.removeListener?.("chainChanged", onChainChanged);
       window.ethereum.removeListener?.("accountsChanged", onAccountsChanged);
+      window.ethereum.removeListener?.("chainChanged", onChainChanged);
     };
   }, []);
 
-  const selectedClassHint = classLabel(classes, tab === "student" ? studentClassId : enrollClassId);
+  const selectedClassHint = classLabel(
+    tab === "student" ? studentClasses : classes,
+    tab === "student" ? studentClassId : selectedClassId
+  );
 
   return (
     <div className="appRoot">
-      <div className="topBar">
-        <div>
-          <div className="appTitle">Hệ thống điểm danh trên Blockchain</div>
-          <div className="small">{chainHint || "Chưa xác định mạng — hãy Connect MetaMask"}</div>
+      <header className="topBar">
+        <div className="brandBlock">
+          <div className="brandMark" aria-hidden>
+            ĐD
+          </div>
+          <div>
+            <div className="appTitle">Điểm danh học tập</div>
+            <div className="appSubtitle">{chainHint}</div>
+          </div>
         </div>
 
-        <div className="row" style={{ margin: 0 }}>
+        <div className="topActions">
           {account ? (
             <div className="walletChip">
-              <span className="small">Ví đang dùng</span>
+              <span className="small">{isTeacher ? "Giáo viên" : "Học viên"}</span>
               <span className="mono">{shortAddr(account)}</span>
             </div>
-          ) : (
-            <div className="small">Chưa kết nối ví</div>
-          )}
-          {chainId !== 11155111 ? (
-            <button className="btn" onClick={switchToSepolia}>
-              Chuyển Sepolia
-            </button>
           ) : null}
-          <button className="btn" onClick={connectWallet}>
-            {account ? "Kết nối lại" : "Connect MetaMask"}
+
+          {account && deployment?.addresses?.attendanceManager ? (
+            <a
+              className="btn btnGhost btnSm"
+              href={explorerAddressUrl(deployment.addresses.attendanceManager)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Etherscan
+            </a>
+          ) : null}
+
+          <button type="button" className="btn btnSm" disabled={busy} onClick={handleConnect}>
+            {account ? "Kết nối lại" : "Kết nối MetaMask"}
           </button>
         </div>
-      </div>
+      </header>
 
-      <div className="tabs">
-        {isTeacher || !canUseContracts ? (
-          <button
-            className={`tabBtn ${tab === "teacher" ? "tabBtnActive" : ""}`}
-            onClick={() => setTab("teacher")}
-          >
-            Giáo viên (Teacher)
-          </button>
-        ) : null}
-        {!isTeacher || !canUseContracts ? (
-          <button
-            className={`tabBtn ${tab === "student" ? "tabBtnActive" : ""}`}
-            onClick={() => setTab("student")}
-          >
-            Học viên (Student)
-          </button>
-        ) : null}
-      </div>
-      {canUseContracts ? (
+      {account && canUseContracts ? (
         <div className="roleHint">
-          {isTeacher
-            ? "Vai trò ví hiện tại: Giáo viên — chỉ thao tác quản lý lớp"
-            : "Vai trò ví hiện tại: Học viên — chỉ xem thông tin học tập"}
+          <span>
+            Vai trò theo ví: <strong>{isTeacher ? "Giáo viên" : "Học viên"}</strong>
+            {selectedClassId ? (
+              <>
+                {" "}
+                · Lớp: <strong>{selectedClassHint}</strong>
+              </>
+            ) : null}
+          </span>
         </div>
       ) : null}
 
       {status.message ? (
-        <div className={status.type === "ok" ? "statusOk" : status.type === "err" ? "statusErr" : "statusIdle"}>
+        <div
+          className={
+            status.type === "ok" ? "statusOk" : status.type === "err" ? "statusErr" : "statusIdle"
+          }
+        >
           {status.message}
+          {lastTxUrl && status.type === "ok" ? (
+            <>
+              {" "}
+              <a href={lastTxUrl} target="_blank" rel="noreferrer">
+                Xem trên Etherscan
+              </a>
+            </>
+          ) : null}
         </div>
       ) : null}
 
-      {!canUseContracts ? (
-        <div className="card">
-          <h2>Bước 0 — Kết nối hợp đồng</h2>
-          <p className="hint">
-            <b>Sepolia:</b> đã deploy sẵn thì dán địa chỉ vào localStorage (hoặc bấm Deploy để tạo bộ mới, tốn gas).
-            <br />
-            <b>Local:</b> chạy <span className="mono">npx hardhat node</span>, MetaMask chainId <b>31337</b>, rồi Deploy.
+      {!account ? (
+        <div className="card connectCard">
+          <CardTitle title="Đăng nhập" />
+          <p className="hint" style={{ textAlign: "center", marginBottom: 0 }}>
+            Kết nối MetaMask trên mạng <b>Sepolia</b>. Vai trò Giáo viên / Học viên lấy theo quyền
+            trên hợp đồng.
           </p>
-          <div className="row">
-            <button className="btn" onClick={doDeploy}>Deploy hợp đồng</button>
-            <button
-              className="btn btnGhost"
-              disabled={!deployment}
-              onClick={() => {
-                clearDeployment();
-                setDeployment(null);
-                setContracts(null);
-                setClasses([]);
-                setAssignments([]);
-                setIsTeacher(false);
-              }}
-            >
-              Xóa địa chỉ đã lưu
+          <div className="connectActions">
+            <button type="button" className="btn" disabled={busy} onClick={handleConnect}>
+              Kết nối MetaMask · Sepolia
+            </button>
+          </div>
+          <div className="infoCallout">
+            Mỗi thao tác cần confirm trên MetaMask. Lịch sử giao dịch xem tại{" "}
+            <a href={SEPOLIA_EXPLORER} target="_blank" rel="noreferrer">
+              Sepolia Etherscan
+            </a>
+            .
+          </div>
+        </div>
+      ) : !canUseContracts ? (
+        <div className="card connectCard">
+          <CardTitle title="Chưa gắn được hợp đồng" />
+          <p className="hint">
+            Ví đã kết nối nhưng chưa tải được hệ thống. Hãy chắc MetaMask đang ở <b>Sepolia</b>, rồi
+            kết nối lại.
+          </p>
+          <div className="connectActions">
+            <button type="button" className="btn" disabled={busy} onClick={handleConnect}>
+              Kết nối lại Sepolia
             </button>
           </div>
         </div>
-      ) : tab === "teacher" ? (
-        !isTeacher ? (
-          <div className="card">
-            <h2>Không có quyền Giáo viên</h2>
-            <p className="hint">
-              Ví <span className="mono">{shortAddr(account)}</span> chưa được cấp <b>TEACHER_ROLE</b>.
-              Hãy chuyển MetaMask sang ví đã deploy hợp đồng (hoặc ví được Admin cấp quyền), rồi bấm Kết nối lại.
-            </p>
-            <button className="btn" onClick={() => setTab("student")}>Sang tab Học viên</button>
-          </div>
-        ) : (
-        <div className="grid2">
-          <div className="card">
-            <h2>1. Tạo lớp học</h2>
-            <p className="hint">Chọn khoảng thời gian bao gồm thời điểm hiện tại để điểm danh được.</p>
-            <div className="row">
-              <div className="label">Tên lớp</div>
-              <input className="input" value={className} onChange={(e) => setClassName(e.target.value)} placeholder="Ví dụ: Lớp Blockchain Demo" />
-            </div>
-            <div className="row">
-              <div className="label">Bắt đầu</div>
-              <input className="input" type="datetime-local" value={classStart} onChange={(e) => setClassStart(e.target.value)} />
-            </div>
-            <div className="row">
-              <div className="label">Kết thúc</div>
-              <input className="input" type="datetime-local" value={classEnd} onChange={(e) => setClassEnd(e.target.value)} />
-            </div>
-            <div className="row">
-              <button className="btn" onClick={handleCreateClass}>Tạo lớp</button>
-            </div>
-          </div>
+      ) : tab === "teacher" && isTeacher ? (
+          <>
+            <nav className="flowNav" aria-label="Chức năng giáo viên">
+              {TEACHER_FLOWS.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  className={`flowBtn ${teacherFlow === f.id ? "flowBtnActive" : ""}`}
+                  onClick={() => setTeacherFlow(f.id)}
+                >
+                  <span className="flowBtnFull">{f.label}</span>
+                  <span className="flowBtnShort">{f.short}</span>
+                </button>
+              ))}
+            </nav>
 
-          <div className="card">
-            <h2>Danh sách lớp</h2>
-            <p className="hint">Bấm <b>Chọn</b> để tự điền ClassId vào các form bên dưới.</p>
-            {classes.length ? (
-              classes.map((c) => (
-                <div key={c.id} className="listItem">
-                  <div>
-                    <div className="listTitle">#{c.id} — {c.name}</div>
-                    <div className="small">Giáo viên: <span className="mono">{shortAddr(c.teacher)}</span></div>
-                    <div className="small">
-                      {new Date(c.startDate * 1000).toLocaleString()} → {new Date(c.endDate * 1000).toLocaleString()}
-                    </div>
+            {teacherFlow !== "class" ? (
+              <div className="classBar">
+                <div className="label">Lớp</div>
+                <ClassSelect
+                  classes={classes}
+                  value={selectedClassId}
+                  emptyText="Chưa có lớp — hãy tạo lớp trước"
+                  onChange={(id) => {
+                    setSelectedClassId(id);
+                    setStudentClassId(id);
+                    setAttendanceSelected([]);
+                  }}
+                />
+                <span className="small">{roster.length} học viên</span>
+              </div>
+            ) : null}
+
+            {teacherFlow === "class" ? (
+              <div className="grid2">
+                <div className="card">
+                  <CardTitle title="Tạo lớp học" />
+                  <p className="hint">Nhập tên và thời gian học của lớp.</p>
+                  <div className="row">
+                    <div className="label">Tên lớp</div>
+                    <input
+                      className="input"
+                      value={className}
+                      onChange={(e) => setClassName(e.target.value)}
+                      placeholder="Ví dụ: Blockchain ứng dụng"
+                    />
                   </div>
+                  <div className="row">
+                    <div className="label">Bắt đầu</div>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={classStart}
+                      onChange={(e) => setClassStart(e.target.value)}
+                    />
+                  </div>
+                  <div className="row">
+                    <div className="label">Kết thúc</div>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={classEnd}
+                      onChange={(e) => setClassEnd(e.target.value)}
+                    />
+                  </div>
+                  <div className="row">
+                    <button type="button" className="btn" disabled={busy} onClick={handleCreateClass}>
+                      Tạo lớp
+                    </button>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <CardTitle title="Lớp của bạn" />
+                  <p className="hint">Chọn một lớp để quản lý học viên và điểm danh.</p>
+                  {classes.length ? (
+                    classes.map((c) => (
+                      <div key={c.id} className="listItem">
+                        <div>
+                          <div className="listTitle">{c.name}</div>
+                          <div className="small">
+                            {new Date(c.startDate * 1000).toLocaleString()} →{" "}
+                            {new Date(c.endDate * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btnSm"
+                          onClick={() => {
+                            setSelectedClassId(String(c.id));
+                            setStudentClassId(String(c.id));
+                            setTeacherFlow("enroll");
+                          }}
+                        >
+                          Quản lý
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="historyEmpty">Chưa có lớp học nào.</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {teacherFlow === "enroll" ? (
+              <div className="grid2">
+                <div className="card">
+                  <CardTitle title="Thêm học viên" />
+                  <p className="hint">
+                    Thêm học viên vào lớp <b>{classLabel(classes, selectedClassId)}</b>.
+                  </p>
+
+                  <div className="field">
+                    <div className="fieldLabel">Địa chỉ ví</div>
+                    <input
+                      className="input"
+                      value={enrollStudentAddr}
+                      onChange={(e) => onEnrollAddrChange(e.target.value)}
+                      placeholder="0x... (địa chỉ MetaMask của học viên)"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <div className="fieldLabel">Họ tên</div>
+                    <input
+                      className="input"
+                      value={enrollStudentName}
+                      onChange={(e) => {
+                        setEnrollStudentName(e.target.value);
+                        setEnrollNameFromChain(false);
+                      }}
+                      placeholder="Nguyễn Văn A"
+                    />
+                    {enrollNameFromChain ? (
+                      <div className="small">Đã tải tên đã lưu theo địa chỉ ví này.</div>
+                    ) : null}
+                    {enrollAlreadyInClass ? (
+                      <div className="small" style={{ color: "var(--err)" }}>
+                        Học viên này đã có trong lớp — không thể thêm lại.
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !selectedClassId || enrollAlreadyInClass || !ethers.isAddress(enrollStudentAddr.trim())}
+                      onClick={handleEnroll}
+                    >
+                      {enrollAlreadyInClass ? "Đã có trong lớp" : "Thêm vào lớp"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btnGhost"
+                      onClick={() => setTeacherFlow("attendance")}
+                    >
+                      Điểm danh
+                    </button>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <CardTitle title="Danh sách học viên" />
+                  <p className="hint">Các học viên đã đăng ký trong lớp này.</p>
+                  {roster.length ? (
+                    roster.map((s) => (
+                      <div key={s.addr} className="listItem">
+                        <div>
+                          <div className="listTitle">{s.name || "Học viên"}</div>
+                          <div className="mono small">{s.addr}</div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="historyEmpty">Chưa có học viên trong lớp.</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {teacherFlow === "attendance" ? (
+              <div className="grid2">
+                <div className="card">
+                  <CardTitle title="Điểm danh buổi học" />
+                  <p className="hint">
+                    Mỗi lần xác nhận tạo <b>một buổi</b> (Buổi {classSessions.length + 1}). Chọn học
+                    viên có mặt rồi xác nhận.
+                  </p>
+                  <StudentChecklist
+                    students={roster}
+                    selected={attendanceSelected}
+                    onToggle={toggleAttendance}
+                    onSelectAll={() => setAttendanceSelected(roster.map((s) => s.addr))}
+                    onClear={() => setAttendanceSelected([])}
+                  />
+                  <div className="row" style={{ marginTop: 14 }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !attendanceSelected.length}
+                      onClick={handleMarkAttendance}
+                    >
+                      Điểm danh Buổi {classSessions.length + 1} ({attendanceSelected.length} HV)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <CardTitle title="Các buổi đã điểm danh" />
+                  <p className="hint">Lịch sử buổi học của lớp đang chọn.</p>
+                  {classSessions.length ? (
+                    [...classSessions].reverse().map((s) => (
+                      <div key={s.sessionNumber} className="listItem">
+                        <div>
+                          <div className="listTitle">Buổi {s.sessionNumber}</div>
+                          <div className="small">
+                            {new Date(s.timestamp * 1000).toLocaleString("vi-VN")}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="historyEmpty">Chưa có buổi điểm danh nào.</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {teacherFlow === "assignment" ? (
+              <div className="grid2">
+                <div className="card">
+                  <CardTitle title="Tạo bài tập" />
+                  <p className="hint">
+                    Giao bài tập cho lớp <b>{classLabel(classes, selectedClassId)}</b>.
+                  </p>
+                  <div className="row">
+                    <div className="label">Tiêu đề</div>
+                    <input
+                      className="input"
+                      value={assignmentTitle}
+                      onChange={(e) => setAssignmentTitle(e.target.value)}
+                      placeholder="Bài tập tuần 1"
+                    />
+                  </div>
+                  <div className="row">
+                    <div className="label">Hạn nộp</div>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={assignmentDeadline}
+                      onChange={(e) => setAssignmentDeadline(e.target.value)}
+                    />
+                  </div>
+                  <div className="row">
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !selectedClassId}
+                      onClick={handleCreateAssignment}
+                    >
+                      Tạo bài tập
+                    </button>
+                  </div>
+
+                  <div className="sectionDivider" />
+                  <div className="listTitle">Bài tập hiện có</div>
+                  {assignments.length ? (
+                    assignments.map((a) => (
+                      <div key={a.id} className="listItem">
+                        <div>
+                          <div className="listTitle">{a.title}</div>
+                          <div className="small">
+                            Hạn: {new Date(Number(a.deadline) * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btnSm"
+                          onClick={() => setCompletionAssignmentId(a.id)}
+                        >
+                          Chọn
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="small">Chưa có bài tập.</div>
+                  )}
+                </div>
+
+                <div className="card">
+                  <CardTitle title="Ghi nhận hoàn thành" />
+                  <p className="hint">Đánh dấu học viên đã hoàn thành bài tập.</p>
+                  <div className="row">
+                    <div className="label">Bài tập</div>
+                    <select
+                      className="select"
+                      value={completionAssignmentId}
+                      onChange={(e) => setCompletionAssignmentId(e.target.value)}
+                      disabled={!assignments.length}
+                    >
+                      {!assignments.length ? (
+                        <option value="">Chưa có bài tập</option>
+                      ) : (
+                        assignments.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.title}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                  <div className="row">
+                    <div className="label">Học viên</div>
+                    <StudentPicker
+                      students={roster}
+                      value={completionStudentAddr}
+                      onChange={setCompletionStudentAddr}
+                      emptyHint="Thêm học viên vào lớp trước."
+                    />
+                  </div>
+                  <div className="row">
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !completionAssignmentId || !completionStudentAddr}
+                      onClick={handleRecordCompletion}
+                    >
+                      Xác nhận hoàn thành
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {teacherFlow === "certificate" ? (
+              <div className="card">
+                <CardTitle title="Cấp chứng nhận" />
+                <p className="hint">
+                  Cấp chứng nhận hoàn thành lớp cho học viên đủ điều kiện (đã điểm danh và hoàn
+                  thành bài tập, nếu có).
+                </p>
+                <div className="row">
+                  <div className="label">Học viên</div>
+                  <StudentPicker
+                    students={roster}
+                    value={certificateStudentAddr}
+                    onChange={setCertificateStudentAddr}
+                  />
+                </div>
+                <div className="row">
                   <button
+                    type="button"
                     className="btn"
-                    onClick={() => {
-                      setEnrollClassId(String(c.id));
-                      setAttendanceClassId(String(c.id));
-                      setAssignmentClassId(String(c.id));
-                      setCertificateClassId(String(c.id));
-                      setStudentClassId(String(c.id));
-                    }}
+                    disabled={busy || !certificateStudentAddr}
+                    onClick={handleIssueCertificate}
                   >
-                    Chọn
+                    Cấp chứng nhận
                   </button>
                 </div>
-              ))
-            ) : (
-              <div className="small">Chưa có lớp. Hãy tạo lớp trước.</div>
-            )}
-          </div>
-
-          <div className="card">
-            <h2>2. Đăng ký học viên (Enroll)</h2>
-            <p className="hint">Mỗi địa chỉ ví chỉ đăng ký <b>một lần</b> cho mỗi lớp. Đang chọn: {classLabel(classes, enrollClassId)}</p>
-            <div className="row">
-              <div className="label">Mã lớp (ClassId)</div>
-              <input className="input" value={enrollClassId} onChange={(e) => setEnrollClassId(e.target.value)} />
-            </div>
-            <div className="row">
-              <div className="label">Địa chỉ ví học viên</div>
-              <input className="input" value={enrollStudentAddr} onChange={(e) => setEnrollStudentAddr(e.target.value)} placeholder="0x..." />
-            </div>
-            <div className="row">
-              <div className="label">Họ tên học viên</div>
-              <input className="input" value={enrollStudentName} onChange={(e) => setEnrollStudentName(e.target.value)} placeholder="Nguyễn Văn A" />
-            </div>
-            <div className="row">
-              <button className="btn" onClick={handleEnroll}>Đăng ký học viên</button>
-            </div>
-          </div>
-
-          <div className="card">
-            <h2>3. Điểm danh</h2>
-            <p className="hint">Thưởng <b>+1 token</b> cho mỗi học viên trong danh sách. Có thể nhập nhiều địa chỉ (mỗi dòng hoặc cách bằng dấu phẩy).</p>
-            <div className="row">
-              <div className="label">Mã lớp (ClassId)</div>
-              <input className="input" value={attendanceClassId} onChange={(e) => setAttendanceClassId(e.target.value)} />
-            </div>
-            <div className="row">
-              <div className="label">Danh sách địa chỉ</div>
-              <textarea className="textarea" value={attendanceStudents} onChange={(e) => setAttendanceStudents(e.target.value)} placeholder={"0xabc...\n0xdef..."} />
-            </div>
-            <div className="row">
-              <button className="btn" onClick={handleMarkAttendance}>Điểm danh (+1 token)</button>
-            </div>
-          </div>
-
-          <div className="card">
-            <h2>4. Tạo bài tập</h2>
-            <p className="hint">Sau khi tạo, bấm <b>Chọn</b> trên bài tập để điền AssignmentId ở bước 5.</p>
-            <div className="row">
-              <div className="label">Mã lớp (ClassId)</div>
-              <input className="input" value={assignmentClassId} onChange={(e) => setAssignmentClassId(e.target.value)} />
-            </div>
-            <div className="row">
-              <div className="label">Tiêu đề bài tập</div>
-              <input className="input" value={assignmentTitle} onChange={(e) => setAssignmentTitle(e.target.value)} placeholder="Bài tập 1" />
-            </div>
-            <div className="row">
-              <div className="label">Hạn nộp</div>
-              <input className="input" type="datetime-local" value={assignmentDeadline} onChange={(e) => setAssignmentDeadline(e.target.value)} />
-            </div>
-            <div className="row">
-              <button className="btn" onClick={handleCreateAssignment}>Tạo bài tập</button>
-            </div>
-
-            <div className="sectionDivider" />
-            <div className="listTitle">Bài tập trong lớp</div>
-            {assignments.length ? (
-              assignments.map((a) => (
-                <div key={a.id} className="listItem">
-                  <div>
-                    <div className="listTitle">#{a.id} — {a.title}</div>
-                    <div className="small">Hạn: {new Date(Number(a.deadline) * 1000).toLocaleString()}</div>
-                  </div>
-                  <button className="btn" onClick={() => setCompletionAssignmentId(a.id)}>Chọn</button>
-                </div>
-              ))
-            ) : (
-              <div className="small">Chưa có bài tập.</div>
-            )}
-          </div>
-
-          <div className="card">
-            <h2>5. Ghi nhận hoàn thành bài tập</h2>
-            <p className="hint">Thưởng <b>+5 token</b>. Học viên phải đã enroll.</p>
-            <div className="row">
-              <div className="label">Mã bài tập (AssignmentId)</div>
-              <input className="input" value={completionAssignmentId} onChange={(e) => setCompletionAssignmentId(e.target.value)} />
-            </div>
-            <div className="row">
-              <div className="label">Địa chỉ ví học viên</div>
-              <input className="input" value={completionStudentAddr} onChange={(e) => setCompletionStudentAddr(e.target.value)} placeholder="0x..." />
-            </div>
-            <div className="row">
-              <button className="btn" onClick={handleRecordCompletion}>Ghi nhận hoàn thành (+5 token)</button>
-            </div>
-
-            <div className="sectionDivider" />
-            <h2>6. Cấp chứng nhận NFT</h2>
-            <p className="hint">Cần đã điểm danh (≥1) và hoàn thành mọi bài tập của lớp (nếu có).</p>
-            <div className="row">
-              <div className="label">Mã lớp (ClassId)</div>
-              <input className="input" value={certificateClassId} onChange={(e) => setCertificateClassId(e.target.value)} />
-            </div>
-            <div className="row">
-              <div className="label">Địa chỉ ví học viên</div>
-              <input className="input" value={certificateStudentAddr} onChange={(e) => setCertificateStudentAddr(e.target.value)} placeholder="0x..." />
-            </div>
-            <div className="row">
-              <button className="btn" onClick={handleIssueCertificate}>Cấp chứng nhận (NFT)</button>
-            </div>
-          </div>
-        </div>
-        )
+              </div>
+            ) : null}
+          </>
       ) : (
         <div className="grid2">
           <div className="card">
-            <h2>Thông tin học tập của bạn</h2>
+            <CardTitle title="Kết quả học tập" />
             <p className="hint">
-              Lớp đang xem: <b>{selectedClassHint}</b>
+              Lớp: <b>{selectedClassHint}</b>
             </p>
             <div className="row">
               <div className="label">Chọn lớp</div>
-              <select
-                className="select"
+              <ClassSelect
+                classes={studentClasses}
                 value={studentClassId}
-                onChange={(e) => {
-                  setStudentClassId(e.target.value);
-                  // reset ngay khi đổi lớp
+                emptyText="Bạn chưa được thêm vào lớp nào"
+                onChange={(id) => {
+                  setStudentClassId(id);
                   setStudentAttendanceCount("0");
                   setStudentHistory([]);
                   setStudentCompletedAssignmentIds([]);
+                  setStudentAssignmentTotal(0);
                   setCachedCertificateTokenId(null);
                   setStudentCertificateBalance("0");
+                  setStudentCertInfo(null);
                 }}
-              >
-                {classes.length ? (
-                  classes.map((c) => (
-                    <option key={c.id} value={String(c.id)}>
-                      #{c.id} — {c.name}
-                    </option>
-                  ))
-                ) : (
-                  <option value="0">Chưa có lớp</option>
-                )}
-              </select>
+              />
             </div>
             <div className="row">
-              <button className="btn" onClick={refreshStudentViews}>Làm mới dữ liệu</button>
+              <button
+                type="button"
+                className="btn"
+                onClick={async () => {
+                  await refreshStudentClasses(contracts.attendanceManager, account, classes);
+                  await refreshStudentViews();
+                }}
+              >
+                Làm mới
+              </button>
             </div>
 
             <div className="statGrid">
               <div className="statCard">
-                <div className="statLabel">Tổng token ví (LRT)</div>
-                <div className="statValue">{studentTokenBalance} <span className="statUnit">LRT</span></div>
-                <div className="statNote">Tổng mọi lớp · +1 điểm danh · +5 bài tập</div>
+                <div className="statLabel">Token thưởng (LRT)</div>
+                <div className="statValue">
+                  {studentTokenBalance} <span className="statUnit">LRT</span>
+                </div>
+                <div className="statNote">Nhận khi điểm danh và hoàn thành bài tập</div>
               </div>
               <div className="statCard">
-                <div className="statLabel">Số buổi điểm danh (lớp này)</div>
+                <div className="statLabel">Số buổi có mặt</div>
                 <div className="statValue">{studentAttendanceCount}</div>
               </div>
               <div className="statCard">
-                <div className="statLabel">Chứng nhận NFT (lớp này)</div>
-                <div className="statValue">{studentCertificateBalance}</div>
-                <div className="statNote">
-                  {Number(studentCertificateBalance) > 0 ? "Đã được cấp cho lớp này" : "Chưa cấp cho lớp này"}
+                <div className="statLabel">Chứng nhận</div>
+                <div className="statValue">
+                  {Number(studentCertificateBalance) > 0 ? "Đã nhận" : "Chưa có"}
                 </div>
               </div>
               <div className="statCard">
-                <div className="statLabel">Bài tập đã hoàn thành (lớp này)</div>
+                <div className="statLabel">Bài tập</div>
                 <div className="statValue">
-                  {studentCompletedAssignmentIds.length
-                    ? studentCompletedAssignmentIds.join(", ")
-                    : "—"}
+                  {studentAssignmentTotal === 0
+                    ? "—"
+                    : `${studentCompletedAssignmentIds.length}/${studentAssignmentTotal}`}
                 </div>
-                <div className="statNote">ID bài tập</div>
+                <div className="statNote">
+                  {studentAssignmentTotal === 0
+                    ? "Lớp chưa giao bài tập"
+                    : studentCompletedAssignmentIds.length >= studentAssignmentTotal
+                      ? "Đã hoàn thành tất cả"
+                      : "Đã làm / tổng bài của lớp"}
+                </div>
               </div>
             </div>
 
-            {cachedCertificateTokenId ? (
-              <div className="small" style={{ marginTop: 10 }}>
-                TokenId chứng nhận (đã lưu): <span className="mono">{cachedCertificateTokenId}</span>
+            {cachedCertificateTokenId || studentCertInfo ? (
+              <div className="certCard">
+                <div className="listTitle">Chứng nhận hoàn thành</div>
+                {studentCertInfo ? (
+                  <>
+                    <div className="small" style={{ marginTop: 8 }}>
+                      Học viên: <b>{studentCertInfo.studentName || "—"}</b>
+                    </div>
+                    <div className="small">
+                      Lớp: <b>{studentCertInfo.className || "—"}</b>
+                    </div>
+                    <div className="small">
+                      Chuyên cần: <b>{studentCertInfo.rate}%</b> (
+                      {studentCertInfo.attendanceCount}/{studentCertInfo.totalSessions} buổi)
+                    </div>
+                    <div className="small">
+                      Ngày cấp:{" "}
+                      {new Date(studentCertInfo.completionDate * 1000).toLocaleString("vi-VN")}
+                    </div>
+                    <div className="small">
+                      TokenId: <span className="mono">{studentCertInfo.tokenId}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="small" style={{ marginTop: 8 }}>
+                    TokenId: <span className="mono">{cachedCertificateTokenId}</span>
+                  </div>
+                )}
               </div>
             ) : null}
           </div>
 
           <div className="card">
-            <h2>Lịch sử điểm danh (10 buổi gần nhất)</h2>
+            <CardTitle title="Lịch sử điểm danh" />
+            <p className="hint">Các buổi bạn đã được điểm danh.</p>
             {studentHistory.length ? (
               studentHistory.map((h, idx) => (
                 <div key={idx} className="listItem">
                   <div>
-                    <div className="listTitle">{h.present ? "Có mặt" : "Vắng mặt"}</div>
-                    <div className="small">{new Date(h.timestamp * 1000).toLocaleString()}</div>
+                    <div className="listTitle">
+                      {h.present ? <span className="presentDot" /> : null}
+                      {h.sessionNumber
+                        ? `Buổi ${h.sessionNumber}`
+                        : h.present
+                          ? "Có mặt"
+                          : "Vắng mặt"}
+                      {h.present && h.sessionNumber ? " · Có mặt" : null}
+                    </div>
+                    <div className="small">
+                      {new Date(h.timestamp * 1000).toLocaleString("vi-VN")}
+                    </div>
                   </div>
                 </div>
               ))
             ) : (
-              <div className="small">Chưa có dữ liệu điểm danh cho lớp này.</div>
+              <div className="historyEmpty">Chưa có lịch sử điểm danh.</div>
             )}
           </div>
         </div>
@@ -903,4 +1512,3 @@ export default function AppBlockchain() {
     </div>
   );
 }
-

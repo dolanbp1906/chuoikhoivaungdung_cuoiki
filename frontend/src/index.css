@@ -1,111 +1,97 @@
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #0f6b6b;
-  --accent-bg: rgba(15, 107, 107, 0.12);
-  --accent-border: rgba(15, 107, 107, 0.45);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --text: #3d4f5f;
+  --text-h: #0c1b2a;
+  --text-muted: #6b7c8c;
+  --bg: #f3f6f9;
+  --bg-elevated: #ffffff;
+  --border: #d5dee7;
+  --border-soft: #e8eef3;
+  --code-bg: #eef3f7;
+  --accent: #0d7a6f;
+  --accent-strong: #0a5f56;
+  --accent-bg: rgba(13, 122, 111, 0.1);
+  --accent-border: rgba(13, 122, 111, 0.35);
+  --accent-glow: rgba(13, 122, 111, 0.18);
+  --ok: #0b7a45;
+  --ok-bg: #e8f8ef;
+  --ok-border: #a8e4c0;
+  --err: #b42318;
+  --err-bg: #fef3f2;
+  --err-border: #fecdca;
+  --warn-bg: #fff8eb;
+  --warn-border: #f5d9a0;
+  --warn-text: #8a5a00;
+  --shadow-sm: 0 1px 2px rgba(12, 27, 42, 0.04);
+  --shadow: 0 8px 24px rgba(12, 27, 42, 0.06), 0 1px 3px rgba(12, 27, 42, 0.04);
+  --radius: 14px;
+  --radius-sm: 10px;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --sans: "IBM Plex Sans", system-ui, sans-serif;
+  --heading: "Sora", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
+  font: 16px/1.5 var(--sans);
+  color-scheme: light;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #2dd4bf;
-    --accent-bg: rgba(45, 212, 191, 0.12);
-    --accent-border: rgba(45, 212, 191, 0.45);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  min-height: 100svh;
+  background:
+    radial-gradient(ellipse 80% 50% at 10% -10%, rgba(13, 122, 111, 0.12), transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(30, 90, 140, 0.08), transparent 50%),
+    linear-gradient(180deg, #eef4f7 0%, var(--bg) 40%, #e9f0f4 100%);
+  background-attachment: fixed;
 }
 
 #root {
-  width: 1180px;
-  max-width: 100%;
+  width: min(1120px, 100%);
   margin: 0 auto;
-  text-align: left;
-  border-inline: 1px solid var(--border);
   min-height: 100svh;
   display: flex;
   flex-direction: column;
-  box-sizing: border-box;
+  padding: 0 16px 40px;
 }
 
 h1,
-h2 {
+h2,
+h3 {
   font-family: var(--heading);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-h);
+  margin: 0;
 }
 
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
 p {
   margin: 0;
 }
 
-code,
-.counter {
+code {
   font-family: var(--mono);
-  display: inline-flex;
+  font-size: 0.9em;
+  padding: 2px 6px;
   border-radius: 4px;
+  background: var(--code-bg);
   color: var(--text-h);
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+@media (max-width: 720px) {
+  :root {
+    font-size: 15px;
+  }
+  #root {
+    padding: 0 12px 28px;
+  }
 }

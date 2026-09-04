@@ -1,8 +1,12 @@
 const hre = require("hardhat");
 
+/** Ví giáo viên dùng trên MetaMask (Sepolia). */
+const TEACHER_ADDRESS = process.env.TEACHER_ADDRESS || "0x68478979b26a96d34Ac9b817977fd1D893bFfE1c";
+
 async function main() {
   const [deployer] = await hre.ethers.getSigners();
   console.log("Deploying contracts with:", deployer.address);
+  console.log("Teacher address:", TEACHER_ADDRESS);
 
   const RewardToken = await hre.ethers.getContractFactory("RewardToken");
   const rewardToken = await RewardToken.deploy(deployer.address);
@@ -23,14 +27,25 @@ async function main() {
   console.log("AttendanceManager deployed to:", attendanceManagerAddr);
 
   const MINTER_ROLE = hre.ethers.keccak256(hre.ethers.toUtf8Bytes("MINTER_ROLE"));
-  await rewardToken.grantRole(MINTER_ROLE, attendanceManagerAddr);
-  await certificateNFT.grantRole(MINTER_ROLE, attendanceManagerAddr);
+  const TEACHER_ROLE = hre.ethers.keccak256(hre.ethers.toUtf8Bytes("TEACHER_ROLE"));
+
+  let tx = await rewardToken.grantRole(MINTER_ROLE, attendanceManagerAddr);
+  await tx.wait();
+  tx = await certificateNFT.grantRole(MINTER_ROLE, attendanceManagerAddr);
+  await tx.wait();
   console.log("MINTER_ROLE granted to AttendanceManager");
+
+  if (TEACHER_ADDRESS.toLowerCase() !== deployer.address.toLowerCase()) {
+    tx = await attendanceManager.grantRole(TEACHER_ROLE, TEACHER_ADDRESS);
+    await tx.wait();
+    console.log("TEACHER_ROLE granted to:", TEACHER_ADDRESS);
+  }
 
   console.log("\n--- Deployment Summary ---");
   console.log("RewardToken:", rewardTokenAddr);
   console.log("CertificateNFT:", certificateNFTAddr);
   console.log("AttendanceManager:", attendanceManagerAddr);
+  console.log("Teacher:", TEACHER_ADDRESS);
 }
 
 main().catch((error) => {

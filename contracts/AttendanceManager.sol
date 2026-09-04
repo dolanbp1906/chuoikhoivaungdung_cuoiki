@@ -29,9 +29,15 @@ contract AttendanceManager is AccessControl {
         bool registered;
     }
 
+    struct ClassSession {
+        uint256 sessionNumber; // 1-based: Buoi 1, Buoi 2, ...
+        uint256 timestamp;
+    }
+
     struct AttendanceRecord {
         uint256 timestamp;
         bool present;
+        uint256 sessionNumber;
     }
 
     struct Assignment {
@@ -48,6 +54,8 @@ contract AttendanceManager is AccessControl {
     mapping(uint256 => address[]) public classStudents;
     mapping(address => Student) public students;
 
+    // classId => sessions of the class
+    mapping(uint256 => ClassSession[]) public classSessions;
     // classId => student => attendance records
     mapping(uint256 => mapping(address => AttendanceRecord[])) public attendanceRecords;
     // classId => student => attendance count
@@ -68,7 +76,13 @@ contract AttendanceManager is AccessControl {
 
     event ClassCreated(uint256 indexed classId, string name, address teacher);
     event StudentEnrolled(uint256 indexed classId, address indexed student);
-    event AttendanceMarked(uint256 indexed classId, address indexed student, uint256 timestamp);
+    event AttendanceMarked(
+        uint256 indexed classId,
+        address indexed student,
+        uint256 timestamp,
+        uint256 sessionNumber
+    );
+    event SessionCreated(uint256 indexed classId, uint256 sessionNumber, uint256 timestamp);
     event AssignmentCreated(uint256 indexed assignmentId, uint256 indexed classId, string title);
     event AssignmentCompleted(uint256 indexed assignmentId, address indexed student);
     event CertificateIssuedEvent(uint256 indexed classId, address indexed student, uint256 tokenId);
@@ -130,8 +144,17 @@ contract AttendanceManager is AccessControl {
     ) external onlyRole(TEACHER_ROLE) {
         Class storage cls = classes[classId];
         require(cls.active, "Class not active");
-        require(block.timestamp >= cls.startDate && block.timestamp <= cls.endDate, "Outside class period");
+        require(
+            block.timestamp >= cls.startDate && block.timestamp <= cls.endDate,
+            "Outside class period"
+        );
+
         totalSessions[classId]++;
+        uint256 sessionNumber = totalSessions[classId];
+        classSessions[classId].push(
+            ClassSession({sessionNumber: sessionNumber, timestamp: block.timestamp})
+        );
+        emit SessionCreated(classId, sessionNumber, block.timestamp);
 
         uint256 len = studentAddrs.length;
         for (uint256 i = 0; i < len; ) {
@@ -139,12 +162,16 @@ contract AttendanceManager is AccessControl {
             require(enrolled[classId][student], "Student not enrolled");
 
             attendanceRecords[classId][student].push(
-                AttendanceRecord({timestamp: block.timestamp, present: true})
+                AttendanceRecord({
+                    timestamp: block.timestamp,
+                    present: true,
+                    sessionNumber: sessionNumber
+                })
             );
             attendanceCount[classId][student]++;
             rewardToken.mint(student, ATTENDANCE_REWARD);
 
-            emit AttendanceMarked(classId, student, block.timestamp);
+            emit AttendanceMarked(classId, student, block.timestamp, sessionNumber);
             unchecked {
                 i++;
             }
@@ -191,7 +218,6 @@ contract AttendanceManager is AccessControl {
         require(!certificateIssued[classId][student], "Certificate already issued");
         require(attendanceCount[classId][student] > 0, "No attendance");
 
-        // If the class has assignments, require the student to complete all of them.
         uint256[] storage assignmentIds = classAssignments[classId];
         uint256 len = assignmentIds.length;
         for (uint256 i = 0; i < len; ) {
@@ -208,6 +234,7 @@ contract AttendanceManager is AccessControl {
         uint256 tokenId = certificateNFT.issueCertificate(
             student,
             classId,
+            classes[classId].name,
             students[student].name,
             attendanceCount[classId][student],
             totalSessions[classId]
@@ -224,6 +251,10 @@ contract AttendanceManager is AccessControl {
         return attendanceRecords[classId][student];
     }
 
+    function getClassSessions(uint256 classId) external view returns (ClassSession[] memory) {
+        return classSessions[classId];
+    }
+
     function getClassStudents(uint256 classId) external view returns (address[] memory) {
         return classStudents[classId];
     }
@@ -232,7 +263,6 @@ contract AttendanceManager is AccessControl {
         return classAssignments[classId];
     }
 
-    // For "Tra cứu lịch sử học tập": trả về các assignment đã hoàn thành của student trong một class.
     function getCompletedAssignments(
         uint256 classId,
         address student

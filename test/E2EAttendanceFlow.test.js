@@ -79,9 +79,21 @@ describe("E2E Attendance Flow", function () {
 
     const cert = await certificateNFT.getCertificate(0);
     expect(cert.classId).to.equal(0);
+    expect(cert.className).to.equal("Blockchain 101");
     expect(cert.studentName).to.equal("Student One");
     expect(cert.attendanceCount).to.equal(1);
     expect(cert.totalSessions).to.equal(1);
+    expect(await certificateNFT.attendanceRate(0)).to.equal(100);
+
+    const uri = await certificateNFT.tokenURI(0);
+    expect(uri.startsWith("data:application/json;base64,")).to.equal(true);
+
+    const sessions = await attendanceManager.getClassSessions(classId);
+    expect(sessions.length).to.equal(1);
+    expect(sessions[0].sessionNumber).to.equal(1);
+
+    const history = await attendanceManager.getAttendanceHistory(classId, student.address);
+    expect(history[0].sessionNumber).to.equal(1);
   });
 });
 

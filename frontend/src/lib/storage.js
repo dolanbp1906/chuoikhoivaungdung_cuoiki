@@ -1,4 +1,4 @@
-const DEPLOYMENT_KEY = "attendance_deployment_v1";
+const DEPLOYMENT_KEY = "attendance_deployment_v3";
 
 function safeJsonParse(value) {
   try {
